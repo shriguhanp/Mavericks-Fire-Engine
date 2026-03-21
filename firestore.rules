@@ -1,0 +1,128 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required) - The user's unique ID
+    //   - email: string (required) - The user's email address
+    //   - displayName: string (optional) - The user's display name
+    //   - photoURL: string (optional) - The user's profile photo URL
+    //   - createdAt: timestamp (required) - When the user was created
+    //
+    // Collection: calculations
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required) - The owner's user ID
+    //   - currentAge: number (required) - Current age
+    //   - retirementAge: number (required) - Target retirement age
+    //   - lifeExpectancy: number (required) - Life expectancy
+    //   - monthlyExpenses: number (required) - Monthly expenses in retirement
+    //   - currentSavings: number (required) - Current savings/investments
+    //   - monthlyInvestment: number (required) - Monthly investment amount
+    //   - inflationRate: number (required) - Expected inflation rate
+    //   - returnRate: number (required) - Expected return rate
+    //   - safeWithdrawalRate: number (required) - Safe withdrawal rate
+    //   - updatedAt: timestamp (required) - When the calculation was last updated
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid;
+    }
+    
+    function uidNotModified() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == resource.data.uid;
+    }
+    
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+    
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function isValidOptionalString(field, minLen, maxLen) {
+      return !(field in request.resource.data) ||
+             (request.resource.data[field] is string &&
+              request.resource.data[field].size() >= minLen &&
+              request.resource.data[field].size() <= maxLen);
+    }
+
+    function isPositiveNumber(field) {
+      return request.resource.data[field] is number && request.resource.data[field] >= 0;
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser() {
+      return hasRequiredFields(['uid', 'email', 'createdAt']) &&
+             request.resource.data.uid is string &&
+             request.resource.data.email is string && isValidEmail(request.resource.data.email) &&
+             request.resource.data.createdAt is timestamp &&
+             isValidOptionalString('displayName', 1, 100) &&
+             isValidOptionalString('photoURL', 1, 2048);
+    }
+
+    function isValidCalculation() {
+      return hasRequiredFields([
+               'uid', 'currentAge', 'retirementAge', 'lifeExpectancy', 
+               'monthlyExpenses', 'currentSavings', 'monthlyInvestment', 
+               'inflationRate', 'returnRate', 'safeWithdrawalRate', 'updatedAt'
+             ]) &&
+             request.resource.data.uid is string &&
+             isPositiveNumber('currentAge') &&
+             isPositiveNumber('retirementAge') &&
+             isPositiveNumber('lifeExpectancy') &&
+             isPositiveNumber('monthlyExpenses') &&
+             isPositiveNumber('currentSavings') &&
+             isPositiveNumber('monthlyInvestment') &&
+             isPositiveNumber('inflationRate') &&
+             isPositiveNumber('returnRate') &&
+             isPositiveNumber('safeWithdrawalRate') &&
+             (!( 'monthlyIncome' in request.resource.data ) || isPositiveNumber('monthlyIncome')) &&
+             isValidOptionalString('lifeGoals', 0, 5000) &&
+             isValidOptionalString('aiRoadmap', 0, 50000) &&
+             request.resource.data.updatedAt is timestamp;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidUser() && uidUnchanged();
+      allow update: if isOwner(userId) && isValidUser() && uidNotModified() && 
+                    request.resource.data.createdAt == resource.data.createdAt;
+      allow delete: if isOwner(userId);
+    }
+
+    match /calculations/{userId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidCalculation() && uidUnchanged();
+      allow update: if isOwner(userId) && isValidCalculation() && uidNotModified();
+      allow delete: if isOwner(userId);
+    }
+  }
+}
