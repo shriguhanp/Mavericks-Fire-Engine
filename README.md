@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🔥 MAVERICKS — FIRE Calculator
+# 🔥 MAVERICKS — FIRE Engine
 
 **Financial Independence, Retire Early — Built for India**
 
