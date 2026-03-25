@@ -3,12 +3,13 @@ import { motion, AnimatePresence } from "motion/react";
 import { Slider } from "./ui/slider";
 import { NumberInput } from "./ui/number-input";
 import { formatCurrency } from "../lib/utils";
-import { auth, db } from "../firebase";
-import { signInWithPopup, GoogleAuthProvider, signOut, onAuthStateChanged, User } from "firebase/auth";
+import { db } from "../firebase";
+import { useUser, SignInButton, UserButton, SignedIn, SignedOut } from "@clerk/clerk-react";
 import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
 import { handleFirestoreError, OperationType } from "../lib/firestore-errors";
 import { GoogleGenAI } from "@google/genai";
 import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import {
   LineChart,
   Line,
@@ -18,14 +19,14 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from "recharts";
-import { 
-  Globe, 
-  ChevronDown, 
-  Clock, 
-  Calendar, 
-  DollarSign, 
-  Star, 
-  Lock, 
+import {
+  Globe,
+  ChevronDown,
+  Clock,
+  Calendar,
+  DollarSign,
+  Star,
+  Lock,
   Target,
   CloudUpload,
   TreePine,
@@ -44,26 +45,26 @@ import {
 
 export default function FireCalculator() {
   const [isDarkMode, setIsDarkMode] = useState(true);
-  const [user, setUser] = useState<User | null>(null);
+  const { user, isLoaded } = useUser();
   const [isSaving, setIsSaving] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingData, setIsLoadingData] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
-      if (currentUser) {
+    const syncUserData = async () => {
+      if (user) {
+        setIsLoadingData(true);
         try {
-          // Ensure user document exists
-          await setDoc(doc(db, "users", currentUser.uid), {
-            uid: currentUser.uid,
-            email: currentUser.email,
-            displayName: currentUser.displayName,
-            photoURL: currentUser.photoURL,
-            createdAt: serverTimestamp()
+          // Ensure user document exists in Firestore
+          await setDoc(doc(db, "users", user.id), {
+            uid: user.id,
+            email: user.primaryEmailAddress?.emailAddress,
+            displayName: user.fullName,
+            photoURL: user.imageUrl,
+            updatedAt: serverTimestamp()
           }, { merge: true });
 
-          // Load saved calculation
-          const calcDoc = await getDoc(doc(db, "calculations", currentUser.uid));
+          // Load saved calculation using Clerk user ID
+          const calcDoc = await getDoc(doc(db, "calculations", user.id));
           if (calcDoc.exists()) {
             const data = calcDoc.data();
             setCurrentAge(data.currentAge);
@@ -72,51 +73,39 @@ export default function FireCalculator() {
             setCurrentSavings(data.currentSavings);
             setMonthlyInvestment(data.monthlyInvestment);
             setInflationRate(data.inflationRate);
-            setIndiaReturn(data.returnRate); // Assuming returnRate maps to indiaReturn for simplicity or blended
+            setIndiaReturn(data.returnRate);
             if (data.monthlyIncome) setMonthlyIncome(data.monthlyIncome);
             if (data.lifeGoals) setLifeGoals(data.lifeGoals);
             if (data.aiRoadmap) setAiRoadmap(data.aiRoadmap);
-            // Note: we might need to store globalAllocation and globalReturn too if we want full state restoration, 
-            // but we'll map what we have in the blueprint.
           }
         } catch (error) {
-          handleFirestoreError(error, OperationType.GET, `calculations/${currentUser.uid}`);
+          handleFirestoreError(error, OperationType.GET, `calculations/${user.id}`);
+        } finally {
+          setIsLoadingData(false);
         }
+      } else {
+        setIsLoadingData(false);
       }
-      setIsLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
+    };
 
-  const handleLogin = async () => {
-    const provider = new GoogleAuthProvider();
-    try {
-      await signInWithPopup(auth, provider);
-    } catch (error) {
-      console.error("Login failed:", error);
+    if (isLoaded) {
+      syncUserData();
     }
-  };
-
-  const handleLogout = async () => {
-    try {
-      await signOut(auth);
-    } catch (error) {
-      console.error("Logout failed:", error);
-    }
-  };
+  }, [user, isLoaded]);
 
   const handleSaveCalculation = async () => {
     if (!user) {
-      handleLogin();
+      // In Clerk, we can trigger the sign-in modal or just let the SignedOut/SignedIn components handle it.
+      // But for this button, we can just alert or do nothing as it should be handled in UI.
       return;
     }
     setIsSaving(true);
     try {
-      await setDoc(doc(db, "calculations", user.uid), {
-        uid: user.uid,
+      await setDoc(doc(db, "calculations", user.id), {
+        uid: user.id,
         currentAge,
         retirementAge,
-        lifeExpectancy: 90, // Default or add to state
+        lifeExpectancy: 90,
         monthlyExpenses,
         currentSavings,
         monthlyInvestment,
@@ -124,13 +113,13 @@ export default function FireCalculator() {
         lifeGoals,
         aiRoadmap,
         inflationRate,
-        returnRate: indiaReturn, // Storing primary return rate
-        safeWithdrawalRate: 4, // Default 4% rule
+        returnRate: indiaReturn,
+        safeWithdrawalRate: 4,
         updatedAt: serverTimestamp()
       });
       alert("Calculation saved successfully!");
     } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `calculations/${user.uid}`);
+      handleFirestoreError(error, OperationType.WRITE, `calculations/${user.id}`);
     } finally {
       setIsSaving(false);
     }
@@ -151,7 +140,7 @@ export default function FireCalculator() {
   const [lifeGoals, setLifeGoals] = useState("Buy a house in 5 years, Child's education in 10 years");
   const [aiRoadmap, setAiRoadmap] = useState<string | null>(null);
   const [isGeneratingRoadmap, setIsGeneratingRoadmap] = useState(false);
-  const [isRoadmapModalOpen, setIsRoadmapModalOpen] = useState(false);
+  const [activeView, setActiveView] = useState<'home' | 'roadmap'>('home');
   const [copied, setCopied] = useState(false);
 
   const downloadRoadmap = () => {
@@ -171,11 +160,11 @@ export default function FireCalculator() {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
-  
+
   const [retirementAge, setRetirementAge] = useState(45);
   const [monthlyExpenses, setMonthlyExpenses] = useState(100000);
   const [lifestyle, setLifestyle] = useState("standard");
-  
+
   const [indiaReturn, setIndiaReturn] = useState(10);
   const [globalReturn, setGlobalReturn] = useState(12);
   const [inflationRate, setInflationRate] = useState(6);
@@ -186,7 +175,7 @@ export default function FireCalculator() {
 
   // Chat widget state
   const [isChatOpen, setIsChatOpen] = useState(false);
-  const [chatMessages, setChatMessages] = useState<{role: 'user' | 'assistant', text: string}[]>([
+  const [chatMessages, setChatMessages] = useState<{ role: 'user' | 'assistant', text: string }[]>([
     { role: 'assistant', text: 'Hi 👋 Welcome to MAVERICKS! I\'m your AI FIRE planning assistant. Ask me anything about Financial Independence or your retirement plan!' }
   ]);
   const [chatInput, setChatInput] = useState('');
@@ -229,42 +218,187 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
 
   const generateRoadmap = async () => {
     setIsGeneratingRoadmap(true);
+    setActiveView('roadmap');
     try {
       const apiKey = import.meta.env.VITE_GEMINI_API_KEY || (typeof process !== 'undefined' && process.env ? process.env.GEMINI_API_KEY : '') || '';
       if (!apiKey) {
         throw new Error("Missing Gemini API Key");
       }
       const ai = new GoogleGenAI({ apiKey });
-      const prompt = `
-        I am planning for Financial Independence and Retire Early (FIRE) in India.
-        Here are my details:
-        - Current Age: ${currentAge}
-        - Target Retirement Age: ${retirementAge}
-        - Monthly Income: ₹${monthlyIncome}
-        - Monthly Expenses: ₹${monthlyExpenses}
-        - Monthly Investment: ₹${monthlyInvestment}
-        - Current Savings/Investments: ₹${currentSavings}
-        - Life Goals: ${lifeGoals}
+      const savingsPotential = monthlyIncome - monthlyExpenses;
+      const prompt = `You are an AI Financial Planner for a FIRE (Financial Independence, Retire Early) application.
 
-        Please build a complete, month-by-month financial roadmap for my first year, and a general long-term roadmap.
-        Include:
-        1. Systematic Investment Plan (SIP) amounts per goal.
-        2. Asset allocation shifts over time.
-        3. Insurance gaps (Life, Health).
-        4. Tax-saving moves (specific to India).
-        5. Emergency fund targets.
-        
-        Format the response in clean Markdown.
-      `;
+Your task is to generate a highly structured, professional, hackathon-winning financial roadmap.
+
+⚠️ STRICT OUTPUT RULES (VERY IMPORTANT):
+
+1. The output MUST be clean, structured, and visually organized.
+2. Use clear section headings with emojis exactly as shown.
+3. ALL financial data must be presented in proper TABLE FORMAT using markdown tables.
+4. Tables MUST be well-aligned with clear columns and borders.
+5. DO NOT give paragraphs where tables are required.
+6. Keep spacing clean and readable.
+7. Follow the EXACT format below — do not change structure.
+8. Output should look like a professional financial report (not casual text).
+9. Use ₹ symbol for all currency values.
+10. Do NOT skip any section.
+11. DO NOT include any conversational filler, greetings, or conclusions outside the specified format. START OUTPUT DIRECTLY WITH THE DASHED LINE.
+
+---
+
+# 🧾 AI MONEY MENTOR – PERSONALIZED FIRE ROADMAP
+
+## 👤 User Financial Profile
+
+- **Age:** ${currentAge}  
+- **Monthly Income:** ₹${monthlyIncome.toLocaleString('en-IN')}  
+- **Monthly Expenses:** ₹${monthlyExpenses.toLocaleString('en-IN')}  
+- **Net Savings Capacity:** ₹${savingsPotential.toLocaleString('en-IN')}  
+- **Existing Investments:** ₹${currentSavings.toLocaleString('en-IN')}  
+- **Current Monthly Investment:** ₹${monthlyInvestment.toLocaleString('en-IN')}  
+- **Target Retirement Age:** ${retirementAge} years  
+- **Expected Return (India):** ${indiaReturn}%  
+- **Expected Return (Global):** ${globalReturn}%  
+- **Global Portfolio Allocation:** ${globalAllocation}%  
+- **Expected Inflation Rate:** ${inflationRate}%  
+- **Target FIRE Corpus Needed:** ₹${results.fireCorpus.toLocaleString('en-IN')}  
+- **Financial Goals:** ${lifeGoals}  
+
+---
+
+# 📊 AI ANALYSIS SUMMARY
+
+- Provide 4–5 bullet insights based on user data
+- Must include:
+  - Savings rate analysis
+  - Risk level
+  - Investment readiness
+  - Strategy line: **Secure → Invest → Grow → Achieve**
+
+---
+
+# 📅 MONTH-BY-MONTH FINANCIAL ROADMAP
+
+## 🔹 Phase 1: Month 1–6 (Financial Foundation)
+
+| Category       | Monthly Allocation | Purpose                          |
+|----------------|------------------|----------------------------------|
+| Emergency Fund | | Build safety buffer              |
+| Insurance      | | Risk protection                  |
+| SIP Investment | | Start investing                  |
+
+### 📌 Output Insight:
+
+- 3 bullet points summarizing results
+
+---
+
+## 🔹 Phase 2: Month 7–12 (Goal Activation)
+
+| Category          | Monthly Allocation | Purpose                        |
+|------------------|------------------|--------------------------------|
+| 🏠 House Fund     | | Long-term goal                 |
+| 🚗 Car Fund       | | Short-term goal                |
+| Tax Saving (ELSS)| | Tax optimization               |
+
+---
+
+## 🔹 Phase 3: Month 13–24 (Acceleration Stage)
+
+- Increase SIP by 10% annually
+
+👉 Show updated values clearly as bullet points
+
+---
+
+# 📈 ASSET ALLOCATION STRATEGY
+
+| Investment Type | Allocation |
+|----------------|-----------|
+| Equity Funds   | XX%        |
+| Debt Funds     | XX%        |
+| Gold           | XX%        |
+
+---
+
+# 🎯 GOAL PROJECTION (AI ESTIMATION)
+
+## 🚗 Car Goal
+
+- Duration: X years  
+- Monthly Investment: ₹XXXX  
+- Expected Corpus: ₹X–X Lakhs  
+
+---
+
+## 🏠 House Goal
+
+- Duration: X years  
+- Monthly Investment: ₹XXXX  
+- Expected Corpus: ₹X–X Lakhs  
+
+---
+
+# 🛡️ INSURANCE GAP ANALYSIS
+
+| Type             | Recommendation        |
+|------------------|----------------------|
+| Life Insurance   | ₹XX Lakhs            |
+| Health Insurance | ₹X–X Lakhs           |
+
+---
+
+# 💸 TAX OPTIMIZATION PLAN
+
+- Section 80C:
+  - ELSS: ₹XX/year
+  - PPF suggestion
+
+- Section 80D:
+  - Health insurance deduction
+
+---
+
+# 🚀 FIRE READINESS SCORE
+
+| Metric           | Score |
+|------------------|-------|
+| Savings Rate     | ⭐⭐⭐⭐⭐ |
+| Risk Protection  | ⭐⭐⭐⭐⭐ |
+| Investment Start | ⭐⭐⭐⭐⭐ |
+| Goal Clarity     | ⭐⭐⭐⭐⭐ |
+
+👉 Overall Score: X / 5
+
+---
+
+# 🧠 AI INSIGHTS (SMART RECOMMENDATIONS)
+
+- Provide 4–5 strong, actionable insights
+- Keep them practical and realistic
+
+---
+
+# 📌 FINAL OUTPUT SUMMARY (FOR UI DISPLAY)
+
+- Monthly Plan (bullet format with ₹ values)
+- Safety status
+- Future outcome (house + car timeline)
+
+---
+
+# 🎯 WHY THIS OUTPUT WINS HACKATHON
+
+- 5 bullet points explaining strengths`;
+
       const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
         contents: prompt,
       });
       setAiRoadmap(response.text || "Failed to generate roadmap.");
-      setIsRoadmapModalOpen(true);
     } catch (error: any) {
       console.error("Failed to generate roadmap:", error);
-      alert(`Failed to generate roadmap. Error: ${error?.message || "Unknown error"}\n\nPlease check if your Gemini API key is configured properly.`);
+      setAiRoadmap(`## ⚠️ Generation Failed\n\nFailed to generate roadmap. Error: ${error?.message || "Unknown error"}\n\nPlease check if your Gemini API key is configured properly.`);
     } finally {
       setIsGeneratingRoadmap(false);
     }
@@ -272,10 +406,10 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
 
   const results = useMemo(() => {
     const yearsToRetirement = Math.max(0, retirementAge - currentAge);
-    
+
     // Future monthly expenses at retirement
     const futureMonthlyExpenses = monthlyExpenses * Math.pow(1 + inflationRate / 100, yearsToRetirement);
-    
+
     // FIRE Corpus required (4% rule)
     const fireCorpus = futureMonthlyExpenses * 12 * 25;
 
@@ -288,7 +422,7 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
 
     for (let year = 0; year <= yearsToRetirement; year++) {
       const months = year * 12;
-      
+
       // Calculate India Corpus
       let indiaCorpus = currentSavings * Math.pow(1 + indiaMonthlyRate, months);
       if (indiaMonthlyRate > 0) {
@@ -333,19 +467,212 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
     globalAllocation,
   ]);
 
+  // ─── FIRE Roadmap Page ──────────────────────────────────────
+  if (activeView === 'roadmap') {
+    return (
+      <div className="min-h-screen bg-slate-50 dark:bg-[#0A0A0A] text-slate-900 dark:text-white font-sans transition-colors duration-300">
+        {/* Top bar */}
+        <div className="sticky top-0 z-50 w-full border-b border-slate-200 dark:border-white/10 bg-white/90 dark:bg-[#0A0A0A]/90 backdrop-blur-lg">
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
+            {/* Left: logo + title */}
+            <div className="flex items-center gap-3 min-w-0">
+              <button
+                onClick={() => setActiveView('home')}
+                className="flex items-center gap-2 text-slate-500 dark:text-white/50 hover:text-slate-900 dark:hover:text-white transition-colors shrink-0"
+                title="Back to Calculator"
+              >
+                <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M5 12l7 7M5 12l7-7" /></svg>
+                <span className="text-sm font-medium hidden sm:inline">Back</span>
+              </button>
+              <div className="h-5 w-px bg-slate-200 dark:bg-white/10 shrink-0" />
+              <div className="flex items-center gap-2 min-w-0">
+                <span className="text-lg">🔥</span>
+                <h1 className="font-bold text-slate-900 dark:text-white truncate text-sm sm:text-base">Your FIRE Roadmap</h1>
+              </div>
+            </div>
+            {/* Right: actions */}
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={copyRoadmap}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-full text-sm font-medium bg-slate-100 dark:bg-white/10 hover:bg-slate-200 dark:hover:bg-white/20 text-slate-700 dark:text-white/80 transition-colors"
+              >
+                {copied ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
+                <span className="hidden sm:inline">{copied ? 'Copied!' : 'Copy'}</span>
+              </button>
+              <button
+                onClick={downloadRoadmap}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-full text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors"
+              >
+                <Download className="w-4 h-4" />
+                <span className="hidden sm:inline">Download</span>
+              </button>
+              <button
+                onClick={() => setIsDarkMode(!isDarkMode)}
+                className="p-2 rounded-full hover:bg-slate-200 dark:hover:bg-white/10 transition-colors text-slate-600 dark:text-white/70"
+              >
+                {isDarkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 py-10">
+          {isGeneratingRoadmap ? (
+            /* Loading skeleton */
+            <div className="space-y-6 animate-pulse">
+              <div className="h-8 bg-slate-200 dark:bg-white/10 rounded-2xl w-3/4" />
+              <div className="h-4 bg-slate-200 dark:bg-white/10 rounded-xl w-full" />
+              <div className="h-4 bg-slate-200 dark:bg-white/10 rounded-xl w-5/6" />
+              <div className="h-4 bg-slate-200 dark:bg-white/10 rounded-xl w-4/5" />
+              <div className="h-32 bg-slate-200 dark:bg-white/10 rounded-2xl w-full" />
+              <div className="h-4 bg-slate-200 dark:bg-white/10 rounded-xl w-full" />
+              <div className="h-4 bg-slate-200 dark:bg-white/10 rounded-xl w-3/4" />
+              <div className="h-48 bg-slate-200 dark:bg-white/10 rounded-2xl w-full" />
+              <div className="text-center text-slate-500 dark:text-white/40 text-sm pt-4">
+                <span className="inline-flex items-center gap-2">
+                  <Sparkles className="w-4 h-4 animate-pulse text-blue-500" />
+                  Generating your personalized FIRE roadmap...
+                </span>
+              </div>
+            </div>
+          ) : aiRoadmap ? (
+            <div className="
+              prose prose-slate dark:prose-invert max-w-none
+              prose-headings:font-bold
+              prose-h1:text-3xl prose-h1:mt-10 prose-h1:mb-4 prose-h1:text-slate-900 dark:prose-h1:text-white
+              prose-h2:text-2xl prose-h2:mt-8 prose-h2:mb-3 prose-h2:text-slate-900 dark:prose-h2:text-white prose-h2:border-b prose-h2:border-slate-200 dark:prose-h2:border-white/10 prose-h2:pb-2
+              prose-h3:text-xl prose-h3:mt-6 prose-h3:mb-2
+              prose-p:mb-4 prose-p:leading-relaxed
+              prose-ul:list-disc prose-ul:pl-6 prose-ul:mb-5 prose-ul:space-y-1
+              prose-strong:text-blue-600 dark:prose-strong:text-blue-400
+              prose-hr:border-slate-200 dark:prose-hr:border-white/10 prose-hr:my-8
+              text-slate-700 dark:text-white/80 text-base leading-relaxed
+            ">
+              <Markdown
+                remarkPlugins={[remarkGfm]}
+                components={{
+                  h1: ({ node: _n, ...props }) => <h1 className="text-3xl font-bold mt-10 mb-4 text-slate-900 dark:text-white" {...props} />,
+                  h2: ({ node: _n, ...props }) => <h2 className="text-2xl font-bold mt-8 mb-3 text-slate-900 dark:text-white border-b border-slate-200 dark:border-white/10 pb-2" {...props} />,
+                  h3: ({ node: _n, ...props }) => <h3 className="text-xl font-semibold mt-6 mb-2 text-slate-800 dark:text-white/90" {...props} />,
+                  p: ({ node: _n, ...props }) => <p className="mb-4 leading-relaxed" {...props} />,
+                  ul: ({ node: _n, ...props }) => <ul className="list-disc pl-6 mb-5 space-y-1" {...props} />,
+                  ol: ({ node: _n, ...props }) => <ol className="list-decimal pl-6 mb-5 space-y-1" {...props} />,
+                  li: ({ node: _n, ...props }) => <li className="text-slate-700 dark:text-white/80" {...props} />,
+                  strong: ({ node: _n, ...props }) => <strong className="font-semibold text-blue-600 dark:text-blue-400" {...props} />,
+                  hr: ({ node: _n, ...props }) => <hr className="border-slate-200 dark:border-white/10 my-8" {...props} />,
+                  blockquote: ({ node: _n, ...props }) => <blockquote className="border-l-4 border-blue-500 pl-4 italic text-slate-500 dark:text-white/50 my-4" {...props} />,
+                  table: ({ node: _n, ...props }) => (
+                    <div className="overflow-x-auto my-8 rounded-xl border-2 border-slate-200 dark:border-white/10 shadow-sm">
+                      <table className="w-full border-collapse text-sm text-left" {...props} />
+                    </div>
+                  ),
+                  thead: ({ node: _n, ...props }) => <thead className="bg-slate-100 dark:bg-white/5 border-b-2 border-slate-200 dark:border-white/10" {...props} />,
+                  tbody: ({ node: _n, ...props }) => <tbody className="divide-y divide-slate-200 dark:divide-white/10" {...props} />,
+                  tr: ({ node: _n, ...props }) => <tr className="hover:bg-slate-50 dark:hover:bg-white/5 transition-colors" {...props} />,
+                  th: ({ node: _n, ...props }) => <th className="border-x border-slate-200 dark:border-white/10 px-5 py-4 font-bold text-slate-900 dark:text-white whitespace-nowrap first:border-l-0 last:border-r-0" {...props} />,
+                  td: ({ node: _n, ...props }) => <td className="border-x border-slate-200 dark:border-white/10 px-5 py-4 text-slate-700 dark:text-white/80 first:border-l-0 last:border-r-0" {...props} />,
+                  code: ({ node: _n, ...props }) => <code className="bg-slate-100 dark:bg-white/10 text-blue-600 dark:text-blue-400 px-1.5 py-0.5 rounded text-sm font-mono" {...props} />,
+                }}
+              >
+                {aiRoadmap}
+              </Markdown>
+            </div>
+          ) : null}
+        </div>
+
+        {/* AI Chat Widget on roadmap page too */}
+        <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
+          <AnimatePresence>
+            {isChatOpen && (
+              <motion.div
+                initial={{ opacity: 0, y: 20, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 20, scale: 0.95 }}
+                transition={{ type: 'spring', damping: 25, stiffness: 300 }}
+                className="w-[340px] sm:w-[380px] bg-white dark:bg-[#111] rounded-3xl shadow-2xl border border-slate-200 dark:border-white/10 flex flex-col overflow-hidden"
+                style={{ maxHeight: '520px' }}
+              >
+                <div className="flex items-center justify-between px-5 py-4 bg-blue-600 shrink-0">
+                  <div className="flex items-center gap-3">
+                    <div className="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center">
+                      <Sparkles className="w-5 h-5 text-white" />
+                    </div>
+                    <div>
+                      <p className="text-white font-bold text-sm leading-tight">MAVERICKS AI</p>
+                      <p className="text-blue-100 text-xs">FIRE Planning Assistant</p>
+                    </div>
+                  </div>
+                  <button onClick={() => setIsChatOpen(false)} className="p-1.5 rounded-full hover:bg-white/20 transition-colors text-white">
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
+                  {chatMessages.map((msg, i) => (
+                    <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${msg.role === 'user' ? 'bg-blue-600 text-white rounded-br-sm' : 'bg-slate-100 dark:bg-white/10 text-slate-800 dark:text-white/90 rounded-bl-sm'
+                        }`}>{msg.text}</div>
+                    </div>
+                  ))}
+                  {isChatLoading && (
+                    <div className="flex justify-start">
+                      <div className="bg-slate-100 dark:bg-white/10 rounded-2xl rounded-bl-sm px-4 py-3 flex items-center gap-1.5">
+                        <span className="w-2 h-2 bg-slate-400 dark:bg-white/50 rounded-full animate-bounce [animation-delay:-0.3s]" />
+                        <span className="w-2 h-2 bg-slate-400 dark:bg-white/50 rounded-full animate-bounce [animation-delay:-0.15s]" />
+                        <span className="w-2 h-2 bg-slate-400 dark:bg-white/50 rounded-full animate-bounce" />
+                      </div>
+                    </div>
+                  )}
+                  <div ref={chatEndRef} />
+                </div>
+                <div className="flex items-center gap-2 px-4 py-3 border-t border-slate-100 dark:border-white/10 shrink-0">
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={e => setChatInput(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && sendChatMessage()}
+                    placeholder="Ask about your FIRE plan..."
+                    className="flex-1 bg-slate-100 dark:bg-white/5 text-slate-900 dark:text-white placeholder:text-slate-400 dark:placeholder:text-white/30 rounded-full px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+                  />
+                  <button
+                    onClick={sendChatMessage}
+                    disabled={!chatInput.trim() || isChatLoading}
+                    className="w-9 h-9 rounded-full bg-blue-600 hover:bg-blue-700 disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center text-white transition-colors shrink-0"
+                  >
+                    <svg className="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5}>
+                      <path d="M22 2L11 13M22 2L15 22L11 13M22 2L2 9L11 13" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  </button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+          <button
+            onClick={() => { setIsChatOpen(prev => !prev); setShowChatBubble(false); }}
+            className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-full shadow-lg shadow-blue-500/30 flex items-center gap-2 font-medium transition-all hover:scale-105"
+          >
+            <MessageCircle className="w-5 h-5" />
+            Need Help?
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Home Page ─────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-slate-50 dark:bg-[#0A0A0A] text-slate-900 dark:text-white font-sans selection:bg-blue-500/30 pb-20 transition-colors duration-300">
-      
+
       {/* Navbar Mock */}
       <div className="pt-6 px-4 relative z-50 flex justify-center">
         <nav className="w-full max-w-5xl flex items-center justify-between px-6 py-3 border border-slate-200 dark:border-white/10 bg-white/80 dark:bg-[#111]/80 backdrop-blur-md rounded-full transition-colors duration-300">
           <div className="flex items-center gap-2">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-              <path d="M2 22L12 2L22 22H16L12 12L8 22H2Z" fill="url(#paint0_linear)"/>
+              <path d="M2 22L12 2L22 22H16L12 12L8 22H2Z" fill="url(#paint0_linear)" />
               <defs>
                 <linearGradient id="paint0_linear" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
-                  <stop stopColor="#60a5fa"/>
-                  <stop offset="1" stopColor="#3b82f6"/>
+                  <stop stopColor="#60a5fa" />
+                  <stop offset="1" stopColor="#3b82f6" />
                 </linearGradient>
               </defs>
             </svg>
@@ -354,23 +681,47 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
           <div className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-white/70">
             <a href="#" className="hover:text-slate-900 dark:hover:text-white transition-colors">About Us</a>
             <a href="#" className="hover:text-slate-900 dark:hover:text-white transition-colors">Learn</a>
+            <button
+              onClick={() => {
+                if (aiRoadmap) { setActiveView('roadmap'); }
+                else { generateRoadmap(); }
+              }}
+              className="hover:text-slate-900 dark:hover:text-white transition-colors"
+            >
+              FIRE
+            </button>
             <div className="flex items-center gap-3 ml-2">
-              <button 
+              <button
                 onClick={() => setIsDarkMode(!isDarkMode)}
                 className="p-2 rounded-full hover:bg-slate-200 dark:hover:bg-white/10 transition-colors text-slate-600 dark:text-white/70"
                 aria-label="Toggle dark mode"
               >
                 {isDarkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
               </button>
-              {isLoading ? (
-                <div className="w-20 h-8 animate-pulse bg-slate-200 dark:bg-white/10 rounded-full"></div>
-              ) : user ? (
+
+              <SignedOut>
+                <SignInButton mode="modal">
+                  <button className="bg-slate-900 dark:bg-white text-white dark:text-black hover:bg-slate-800 dark:hover:bg-white/90 px-5 py-2 rounded-full transition-colors font-semibold text-sm">
+                    Login
+                  </button>
+                </SignInButton>
+              </SignedOut>
+              <SignedIn>
                 <div className="flex items-center gap-3">
-                  <img src={user.photoURL || ""} alt="Profile" className="w-8 h-8 rounded-full border border-slate-200 dark:border-white/20" referrerPolicy="no-referrer" />
-                  <button onClick={handleLogout} className="bg-slate-100 dark:bg-white/10 text-slate-900 dark:text-white hover:bg-slate-200 dark:hover:bg-white/20 px-4 py-2 rounded-full transition-colors font-semibold text-sm">Logout</button>
+                  <UserButton
+                    afterSignOutUrl="/"
+                    appearance={{
+                      elements: {
+                        avatarBox: "w-8 h-8 rounded-full border border-slate-200 dark:border-white/20"
+                      }
+                    }}
+                  />
+                  {/* We could add a manual logout button here too, but UserButton handles it. Maintaining the Logout button for layout consistency if desired */}
                 </div>
-              ) : (
-                <button onClick={handleLogin} className="bg-slate-900 dark:bg-white text-white dark:text-black hover:bg-slate-800 dark:hover:bg-white/90 px-5 py-2 rounded-full transition-colors font-semibold text-sm">Login</button>
+              </SignedIn>
+
+              {!isLoaded && (
+                <div className="w-20 h-8 animate-pulse bg-slate-200 dark:bg-white/10 rounded-full"></div>
               )}
             </div>
           </div>
@@ -381,9 +732,9 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
       <div className="relative pt-24 pb-32 overflow-hidden flex flex-col items-center text-center px-4">
         {/* Blue Glow */}
         <div className="absolute top-[150px] left-1/2 -translate-x-1/2 w-[800px] h-[500px] bg-blue-600/30 blur-[120px] rounded-[100%] pointer-events-none z-0" />
-        
+
         {/* Earth Arc */}
-        <div className="absolute top-[320px] left-1/2 -translate-x-1/2 w-[200%] md:w-[150%] h-[1000px] rounded-[100%] pointer-events-none z-0 overflow-hidden border-t-2 border-blue-400/50 shadow-[0_-20px_50px_rgba(59,130,246,0.1)] dark:shadow-[0_-20px_50px_rgba(59,130,246,0.3)] bg-slate-50 dark:bg-[#0A0A0A] transition-colors duration-300">
+        <div className="absolute top-[280px] left-1/2 -translate-x-1/2 w-[200%] md:w-[150%] h-[1000px] rounded-[100%] pointer-events-none z-0 overflow-hidden border-t-2 border-blue-400/50 shadow-[0_-20px_50px_rgba(59,130,246,0.1)] dark:shadow-[0_-20px_50px_rgba(59,130,246,0.3)] bg-slate-50 dark:bg-[#0A0A0A] transition-colors duration-300">
           <div className="absolute inset-0 bg-[url('https://images.unsplash.com/photo-1451187580459-43490279c0fa?auto=format&fit=crop&w=1600&q=80')] bg-cover bg-top opacity-20 dark:opacity-60 mix-blend-screen dark:mix-blend-screen" />
           <div className="absolute inset-0 bg-gradient-to-b from-transparent via-slate-50/80 to-slate-50 dark:from-transparent dark:via-transparent dark:to-[#0A0A0A] transition-colors duration-300" />
         </div>
@@ -392,15 +743,15 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
           <h1 className="text-5xl md:text-6xl lg:text-7xl font-bold text-slate-900 dark:text-white tracking-tight mb-6 leading-tight transition-colors duration-300">
             Calculate your path to FIRE
           </h1>
-          
+
           <p className="text-lg md:text-xl text-slate-600 dark:text-white/70 max-w-3xl mx-auto mb-12 leading-relaxed transition-colors duration-300">
             Discover when you can achieve Financial Independence and Retire Early in India. Learn how global investing can accelerate your journey by 3-5 years.
           </p>
 
           <div className="flex flex-wrap justify-center gap-8 md:gap-16 text-sm text-slate-700 dark:text-white/80 mb-20 transition-colors duration-300">
-            <div className="flex items-center gap-2"><Star className="w-5 h-5 text-yellow-500 fill-yellow-500"/> 50,000+ Users</div>
-            <div className="flex items-center gap-2"><Lock className="w-5 h-5 text-slate-500 dark:text-slate-400"/> Bank-Grade Security</div>
-            <div className="flex items-center gap-2"><Globe className="w-5 h-5 text-blue-500 dark:text-blue-400"/> Global Markets</div>
+            <div className="flex items-center gap-2"><Star className="w-5 h-5 text-yellow-500 fill-yellow-500" /> 50,000+ Users</div>
+            <div className="flex items-center gap-2"><Lock className="w-5 h-5 text-slate-500 dark:text-slate-400" /> Bank-Grade Security</div>
+            <div className="flex items-center gap-2"><Globe className="w-5 h-5 text-blue-500 dark:text-blue-400" /> Global Markets</div>
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 w-full max-w-4xl mx-auto mt-12 relative z-20">
@@ -413,10 +764,10 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
               <div key={i} className="relative overflow-hidden rounded-[2.5rem] bg-white/20 dark:bg-white/5 backdrop-blur-xl border border-white/60 dark:border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.08)] dark:shadow-[0_8px_32px_rgba(0,0,0,0.3)] p-8 transition-all duration-500 hover:-translate-y-2 hover:shadow-[0_16px_48px_rgba(0,0,0,0.12)] dark:hover:shadow-[0_16px_48px_rgba(0,0,0,0.4)] group">
                 {/* Inner shadow / highlight for liquid feel */}
                 <div className="absolute inset-0 rounded-[2.5rem] shadow-[inset_0_1px_1px_rgba(255,255,255,0.8)] dark:shadow-[inset_0_1px_1px_rgba(255,255,255,0.2)] pointer-events-none" />
-                
+
                 {/* Liquid reflection sweep */}
                 <div className="absolute -inset-[100%] bg-gradient-to-r from-transparent via-white/40 dark:via-white/10 to-transparent opacity-0 group-hover:opacity-100 group-hover:translate-x-[100%] transition-all duration-1000 ease-in-out pointer-events-none rotate-45" />
-                
+
                 <div className="relative z-10 flex flex-col items-center justify-center text-center h-full">
                   <div className="text-4xl md:text-5xl font-extrabold text-slate-800 dark:text-white mb-3 tracking-tight drop-shadow-sm transition-colors duration-300">{stat.value}</div>
                   <div className="text-sm md:text-base font-medium text-slate-600 dark:text-white/70 transition-colors duration-300">{stat.label}</div>
@@ -430,11 +781,11 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
       {/* Calculator Section */}
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          
+
           {/* Left Column - Inputs */}
           <div className="lg:col-span-5 space-y-6">
             <div className="bg-white dark:bg-[#111] rounded-3xl p-6 sm:p-8 border border-slate-200 dark:border-white/10 shadow-sm dark:shadow-none transition-colors duration-300">
-              
+
               <div className="space-y-10">
                 {/* Current Financial Status */}
                 <div>
@@ -486,7 +837,7 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
                     <div className="flex flex-col gap-2">
                       <label className="text-sm font-medium text-slate-600 dark:text-white/70 transition-colors duration-300">Lifestyle Type</label>
                       <div className="relative">
-                        <select 
+                        <select
                           className="w-full h-12 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-100 dark:bg-white/5 px-4 py-2 text-base font-medium text-slate-900 dark:text-white appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-300"
                           value={lifestyle}
                           onChange={(e) => {
@@ -561,16 +912,16 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
 
               </div>
             </div>
-            
+
             <div className="flex flex-col sm:flex-row gap-4 mt-6">
-              <button 
+              <button
                 onClick={generateRoadmap}
                 disabled={isGeneratingRoadmap}
                 className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-4 rounded-full font-bold text-lg shadow-lg shadow-blue-500/30 transition-all hover:scale-[1.02] flex items-center justify-center gap-2 disabled:opacity-50 disabled:hover:scale-100"
               >
                 <Target className="w-5 h-5" /> {isGeneratingRoadmap ? "Generating Roadmap..." : "Generate AI Roadmap"}
               </button>
-              <button 
+              <button
                 onClick={handleSaveCalculation}
                 disabled={isSaving}
                 className="flex-1 bg-white dark:bg-[#111] hover:bg-slate-50 dark:hover:bg-[#222] text-slate-900 dark:text-white border border-slate-200 dark:border-white/10 py-4 rounded-full font-bold text-lg shadow-sm transition-all hover:scale-[1.02] flex items-center justify-center gap-2 disabled:opacity-50 disabled:hover:scale-100"
@@ -582,13 +933,13 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
 
           {/* Right Column - Results */}
           <div className="lg:col-span-7 space-y-6">
-            
+
             {/* FIRE Number Card */}
             <div className="bg-blue-50 dark:bg-[#001A3B] rounded-3xl p-8 relative overflow-hidden border border-blue-200 dark:border-blue-500/20 shadow-sm dark:shadow-[0_0_40px_rgba(0,163,255,0.1)] transition-colors duration-300">
               <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 w-[600px] h-[600px] rounded-full border border-blue-200 dark:border-blue-400/10 transition-colors duration-300" />
               <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 w-[450px] h-[450px] rounded-full border border-blue-200 dark:border-blue-400/10 transition-colors duration-300" />
               <div className="absolute bottom-0 left-1/2 -translate-x-1/2 translate-y-1/2 w-[300px] h-[300px] rounded-full border border-blue-200 dark:border-blue-400/10 transition-colors duration-300" />
-              
+
               <div className="relative z-10 text-center py-6">
                 <h3 className="text-lg font-medium text-blue-900/80 dark:text-white/80 mb-4 transition-colors duration-300">Your FIRE Number</h3>
                 <div className="text-5xl sm:text-6xl md:text-7xl font-bold text-blue-950 dark:text-white mb-4 tracking-tight transition-colors duration-300">
@@ -639,18 +990,17 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
                     <button
                       key={tab.id}
                       onClick={() => setChartView(tab.id)}
-                      className={`px-4 py-2 rounded-full text-sm font-semibold transition-all duration-200 ${
-                        chartView === tab.id
+                      className={`px-4 py-2 rounded-full text-sm font-semibold transition-all duration-200 ${chartView === tab.id
                           ? tab.color
                           : 'text-slate-500 dark:text-white/50 hover:text-slate-800 dark:hover:text-white/80'
-                      }`}
+                        }`}
                     >
                       {tab.label}
                     </button>
                   ))}
                 </div>
               </div>
-              
+
               {/* Legend colors */}
               <div className="flex justify-center gap-6 mb-6 text-sm">
                 {(chartView === 'global' || chartView === 'both') && (
@@ -670,73 +1020,73 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
                   <span className="text-slate-600 dark:text-white/70">FIRE Target</span>
                 </div>
               </div>
-              
+
               <div className="h-[350px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={results.chartData} margin={{ top: 20, right: 20, left: 0, bottom: 0 }}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode ? "#ffffff10" : "#00000010"} />
-                    <XAxis 
-                      dataKey="age" 
-                      stroke={isDarkMode ? "#ffffff40" : "#00000040"} 
-                      tick={{fill: isDarkMode ? '#ffffff40' : '#00000040', fontSize: 12}} 
-                      axisLine={false} 
-                      tickLine={false} 
-                      dy={10} 
+                    <XAxis
+                      dataKey="age"
+                      stroke={isDarkMode ? "#ffffff40" : "#00000040"}
+                      tick={{ fill: isDarkMode ? '#ffffff40' : '#00000040', fontSize: 12 }}
+                      axisLine={false}
+                      tickLine={false}
+                      dy={10}
                     />
-                    <YAxis 
-                      stroke={isDarkMode ? "#ffffff40" : "#00000040"} 
-                      tick={{fill: isDarkMode ? '#ffffff40' : '#00000040', fontSize: 12}} 
-                      axisLine={false} 
-                      tickLine={false} 
-                      dx={-10} 
+                    <YAxis
+                      stroke={isDarkMode ? "#ffffff40" : "#00000040"}
+                      tick={{ fill: isDarkMode ? '#ffffff40' : '#00000040', fontSize: 12 }}
+                      axisLine={false}
+                      tickLine={false}
+                      dx={-10}
                       tickFormatter={(val) => {
                         if (val >= 10000000) return `₹${(val / 10000000).toFixed(1)}Cr`;
                         if (val >= 100000) return `₹${(val / 100000).toFixed(0)}L`;
                         return `₹${val.toLocaleString('en-IN')}`;
-                      }} 
+                      }}
                     />
-                    <Tooltip 
+                    <Tooltip
                       contentStyle={{
-                        backgroundColor: isDarkMode ? '#111' : '#fff', 
-                        borderColor: isDarkMode ? '#ffffff10' : '#00000010', 
-                        borderRadius: '12px', 
-                        color: isDarkMode ? '#fff' : '#000', 
+                        backgroundColor: isDarkMode ? '#111' : '#fff',
+                        borderColor: isDarkMode ? '#ffffff10' : '#00000010',
+                        borderRadius: '12px',
+                        color: isDarkMode ? '#fff' : '#000',
                         padding: '12px',
                         boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)'
-                      }} 
-                      itemStyle={{color: isDarkMode ? '#fff' : '#000', fontWeight: 500}}
-                      labelStyle={{color: isDarkMode ? '#ffffff80' : '#00000080', marginBottom: '4px'}}
+                      }}
+                      itemStyle={{ color: isDarkMode ? '#fff' : '#000', fontWeight: 500 }}
+                      labelStyle={{ color: isDarkMode ? '#ffffff80' : '#00000080', marginBottom: '4px' }}
                       formatter={(value: number, name: string) => [
-                        formatCurrency(value), 
+                        formatCurrency(value),
                         name === 'globalCorpus' ? 'Global Portfolio' : name === 'indiaCorpus' ? 'India Only' : 'FIRE Target'
                       ]}
                       labelFormatter={(label) => `Age ${label}`}
                     />
-                    <Line 
-                        type="monotone" 
-                        dataKey="targetCorpus" 
-                        stroke="#ef4444" 
-                        strokeWidth={2} 
-                        dot={false} 
-                        strokeDasharray="5 5" 
-                        activeDot={false} 
-                      />
+                    <Line
+                      type="monotone"
+                      dataKey="targetCorpus"
+                      stroke="#ef4444"
+                      strokeWidth={2}
+                      dot={false}
+                      strokeDasharray="5 5"
+                      activeDot={false}
+                    />
                     {(chartView === 'global' || chartView === 'both') && (
-                      <Line 
-                        type="monotone" 
-                        dataKey="globalCorpus" 
-                        stroke="#3b82f6" 
-                        strokeWidth={3} 
-                        dot={false} 
+                      <Line
+                        type="monotone"
+                        dataKey="globalCorpus"
+                        stroke="#3b82f6"
+                        strokeWidth={3}
+                        dot={false}
                         activeDot={{ r: 6, fill: '#3b82f6', stroke: isDarkMode ? '#fff' : '#000', strokeWidth: 2 }}
                       />
                     )}
                     {(chartView === 'india' || chartView === 'both') && (
-                      <Line 
-                        type="monotone" 
-                        dataKey="indiaCorpus" 
+                      <Line
+                        type="monotone"
+                        dataKey="indiaCorpus"
                         stroke="#f97316"
-                        strokeWidth={2.5} 
+                        strokeWidth={2.5}
                         dot={false}
                         strokeDasharray="6 3"
                         activeDot={{ r: 6, fill: '#f97316', stroke: isDarkMode ? '#fff' : '#000', strokeWidth: 2 }}
@@ -747,11 +1097,11 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
               </div>
             </div>
 
-            {/* AI Roadmap Display */}
+            {/* AI Roadmap CTA — shown after roadmap is ready */}
             {aiRoadmap && (
               <div className="flex justify-center mt-8">
                 <button
-                  onClick={() => setIsRoadmapModalOpen(true)}
+                  onClick={() => setActiveView('roadmap')}
                   className="group relative inline-flex items-center justify-center gap-3 px-8 py-4 bg-gradient-to-r from-blue-600 to-indigo-600 dark:from-blue-500 dark:to-indigo-500 text-white rounded-full font-bold text-lg shadow-xl shadow-blue-500/30 hover:shadow-blue-500/50 transition-all hover:-translate-y-1 overflow-hidden"
                 >
                   <div className="absolute inset-0 bg-white/20 group-hover:translate-x-full -translate-x-full transition-transform duration-500 ease-in-out skew-x-12" />
@@ -760,76 +1110,6 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
                 </button>
               </div>
             )}
-
-            <AnimatePresence>
-              {isRoadmapModalOpen && aiRoadmap && (
-                <motion.div
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6 bg-slate-900/60 dark:bg-black/80 backdrop-blur-sm"
-                >
-                  <motion.div
-                    initial={{ scale: 0.95, opacity: 0, y: 20 }}
-                    animate={{ scale: 1, opacity: 1, y: 0 }}
-                    exit={{ scale: 0.95, opacity: 0, y: 20 }}
-                    transition={{ type: "spring", damping: 25, stiffness: 300 }}
-                    className="relative w-full max-w-4xl max-h-[90vh] bg-white dark:bg-[#0A0A0A] border border-slate-200 dark:border-white/10 rounded-3xl shadow-2xl flex flex-col overflow-hidden"
-                  >
-                    {/* Header */}
-                    <div className="flex items-center justify-between p-6 border-b border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-[#111] shrink-0">
-                      <h3 className="text-xl sm:text-2xl font-bold text-slate-900 dark:text-white flex items-center gap-3">
-                        <Sparkles className="w-6 h-6 text-blue-500" /> 
-                        Your Personalized FIRE Roadmap
-                      </h3>
-                      <div className="flex items-center gap-2">
-                        <button
-                          onClick={copyRoadmap}
-                          title="Copy to clipboard"
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-full text-sm font-medium bg-slate-100 dark:bg-white/10 hover:bg-slate-200 dark:hover:bg-white/20 text-slate-700 dark:text-white/80 transition-colors"
-                        >
-                          {copied ? <Check className="w-4 h-4 text-green-500" /> : <Copy className="w-4 h-4" />}
-                          <span className="hidden sm:inline">{copied ? "Copied!" : "Copy"}</span>
-                        </button>
-                        <button
-                          onClick={downloadRoadmap}
-                          title="Download as Markdown"
-                          className="flex items-center gap-1.5 px-3 py-2 rounded-full text-sm font-medium bg-blue-600 hover:bg-blue-700 text-white transition-colors"
-                        >
-                          <Download className="w-4 h-4" />
-                          <span className="hidden sm:inline">Download</span>
-                        </button>
-                        <button 
-                          onClick={() => setIsRoadmapModalOpen(false)}
-                          className="p-2 rounded-full hover:bg-slate-200 dark:hover:bg-white/10 text-slate-500 dark:text-white/60 transition-colors"
-                        >
-                          <X className="w-6 h-6" />
-                        </button>
-                      </div>
-                    </div>
-                    
-                    {/* Content */}
-                    <div className="p-6 sm:p-8 overflow-y-auto flex-1">
-                      <div className="prose dark:prose-invert max-w-none text-slate-700 dark:text-white/80 text-base leading-relaxed">
-                        <Markdown
-                          components={{
-                            h1: ({node: _n, ...props}) => <h1 className="text-3xl font-bold mt-8 mb-4 text-slate-900 dark:text-white" {...props} />,
-                            h2: ({node: _n, ...props}) => <h2 className="text-2xl font-bold mt-8 mb-4 text-slate-900 dark:text-white border-b border-slate-200 dark:border-white/10 pb-2" {...props} />,
-                            h3: ({node: _n, ...props}) => <h3 className="text-xl font-semibold mt-6 mb-3 text-slate-800 dark:text-white/90" {...props} />,
-                            p: ({node: _n, ...props}) => <p className="mb-4" {...props} />,
-                            ul: ({node: _n, ...props}) => <ul className="list-disc pl-6 mb-6 space-y-2" {...props} />,
-                            li: ({node: _n, ...props}) => <li {...props} />,
-                            strong: ({node: _n, ...props}) => <strong className="font-semibold text-blue-600 dark:text-blue-400" {...props} />
-                          }}
-                        >
-                          {aiRoadmap}
-                        </Markdown>
-                      </div>
-                    </div>
-                  </motion.div>
-                </motion.div>
-              )}
-            </AnimatePresence>
 
           </div>
         </div>
@@ -841,7 +1121,7 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
         <p className="text-center text-slate-600 dark:text-white/60 mb-12 max-w-3xl mx-auto text-lg transition-colors duration-300">
           Financial Independence, Retire Early (FIRE) is a movement focused on aggressive savings and investing to retire decades before traditional retirement age through financial freedom
         </p>
-        
+
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
           <div className="bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 rounded-3xl p-8 hover:border-slate-300 dark:hover:border-white/20 shadow-sm dark:shadow-none transition-colors duration-300">
             <h3 className="text-xl font-bold mb-2 text-slate-900 dark:text-white transition-colors duration-300">Lean FIRE</h3>
@@ -874,10 +1154,10 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
       {/* Real world FIRE comparison */}
       <div className="max-w-5xl mx-auto mt-32 px-4 relative">
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-blue-600/10 blur-[120px] rounded-full pointer-events-none" />
-        
+
         <h2 className="text-3xl font-bold text-center mb-4 text-slate-900 dark:text-white transition-colors duration-300">Real world FIRE comparison</h2>
         <p className="text-center text-slate-600 dark:text-white/60 mb-8 text-lg transition-colors duration-300">See the tangible impact of global investing on your retirement timeline</p>
-        
+
         <div className="text-center text-sm font-medium text-slate-700 dark:text-white/80 mb-12 bg-slate-100 dark:bg-white/5 border border-slate-200 dark:border-white/10 rounded-2xl p-4 w-full backdrop-blur-sm transition-colors duration-300">
           <div className="mb-2 text-slate-500 dark:text-white/50 uppercase tracking-wider text-xs font-bold transition-colors duration-300">Starting Scenario (Identical for both)</div>
           <span className="text-slate-900 dark:text-white transition-colors duration-300">Age:</span> 30 years <span className="mx-2 text-slate-300 dark:text-white/20">|</span> <span className="text-slate-900 dark:text-white transition-colors duration-300">Initial Savings:</span> ₹10L <span className="mx-2 text-slate-300 dark:text-white/20">|</span> <span className="text-slate-900 dark:text-white transition-colors duration-300">Monthly Investment:</span> ₹75K <span className="mx-2 text-slate-300 dark:text-white/20">|</span> <span className="text-slate-900 dark:text-white transition-colors duration-300">Target:</span> Retire by 50
@@ -889,14 +1169,14 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
               <span className="text-2xl">🇮🇳</span> India-Only Strategy
             </h3>
             <ul className="space-y-5 text-slate-600 dark:text-white/70 transition-colors duration-300">
-              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300"/> 100% allocation to Indian equities & bonds</li>
-              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300"/> 12% average annual returns</li>
-              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300"/> Achieves FIRE at age 50</li>
-              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300"/> Final corpus: ₹8.2 Crores</li>
-              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300"/> Higher concentration in single market</li>
-              <li className="flex items-center gap-4 text-red-500 dark:text-red-400 transition-colors duration-300"><div className="w-1.5 h-1.5 rounded-full bg-red-500 dark:bg-red-400 shrink-0 transition-colors duration-300"/> Single market risk</li>
-              <li className="flex items-center gap-4 text-red-500 dark:text-red-400 transition-colors duration-300"><div className="w-1.5 h-1.5 rounded-full bg-red-500 dark:bg-red-400 shrink-0 transition-colors duration-300"/> Limited Diversification</li>
-              <li className="flex items-center gap-4 text-red-500 dark:text-red-400 transition-colors duration-300"><div className="w-1.5 h-1.5 rounded-full bg-red-500 dark:bg-red-400 shrink-0 transition-colors duration-300"/> No currency hedge</li>
+              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300" /> 100% allocation to Indian equities & bonds</li>
+              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300" /> 12% average annual returns</li>
+              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300" /> Achieves FIRE at age 50</li>
+              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300" /> Final corpus: ₹8.2 Crores</li>
+              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300" /> Higher concentration in single market</li>
+              <li className="flex items-center gap-4 text-red-500 dark:text-red-400 transition-colors duration-300"><div className="w-1.5 h-1.5 rounded-full bg-red-500 dark:bg-red-400 shrink-0 transition-colors duration-300" /> Single market risk</li>
+              <li className="flex items-center gap-4 text-red-500 dark:text-red-400 transition-colors duration-300"><div className="w-1.5 h-1.5 rounded-full bg-red-500 dark:bg-red-400 shrink-0 transition-colors duration-300" /> Limited Diversification</li>
+              <li className="flex items-center gap-4 text-red-500 dark:text-red-400 transition-colors duration-300"><div className="w-1.5 h-1.5 rounded-full bg-red-500 dark:bg-red-400 shrink-0 transition-colors duration-300" /> No currency hedge</li>
             </ul>
           </div>
           <div className="bg-blue-50 dark:bg-[#111] border border-blue-200 dark:border-blue-500/30 rounded-3xl p-8 relative overflow-hidden shadow-sm dark:shadow-[0_0_30px_rgba(59,130,246,0.1)] hover:border-blue-300 dark:hover:border-blue-500/50 transition-colors duration-300">
@@ -905,14 +1185,14 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
               <span className="text-2xl">🌐</span> Global Strategy
             </h3>
             <ul className="space-y-5 text-slate-600 dark:text-white/70 relative z-10 transition-colors duration-300">
-              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300"/> 60% Indian + 40% Global markets</li>
-              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300"/> 14% blended annual returns</li>
-              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300"/> Achieves FIRE at age 47</li>
-              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300"/> Final corpus: ₹8.2 Crores</li>
-              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300"/> Multi-country risk distribution</li>
-              <li className="flex items-center gap-4 text-emerald-600 dark:text-green-400 font-medium transition-colors duration-300"><div className="w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-green-400 shrink-0 transition-colors duration-300"/> Retire 3 years earlier</li>
-              <li className="flex items-center gap-4 text-emerald-600 dark:text-green-400 font-medium transition-colors duration-300"><div className="w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-green-400 shrink-0 transition-colors duration-300"/> Geographic Diversification</li>
-              <li className="flex items-center gap-4 text-emerald-600 dark:text-green-400 font-medium transition-colors duration-300"><div className="w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-green-400 shrink-0 transition-colors duration-300"/> Currency appreciation benefits</li>
+              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300" /> 60% Indian + 40% Global markets</li>
+              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300" /> 14% blended annual returns</li>
+              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300" /> Achieves FIRE at age 47</li>
+              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300" /> Final corpus: ₹8.2 Crores</li>
+              <li className="flex items-center gap-4"><div className="w-1.5 h-1.5 rounded-full bg-slate-400 dark:bg-white/50 shrink-0 transition-colors duration-300" /> Multi-country risk distribution</li>
+              <li className="flex items-center gap-4 text-emerald-600 dark:text-green-400 font-medium transition-colors duration-300"><div className="w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-green-400 shrink-0 transition-colors duration-300" /> Retire 3 years earlier</li>
+              <li className="flex items-center gap-4 text-emerald-600 dark:text-green-400 font-medium transition-colors duration-300"><div className="w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-green-400 shrink-0 transition-colors duration-300" /> Geographic Diversification</li>
+              <li className="flex items-center gap-4 text-emerald-600 dark:text-green-400 font-medium transition-colors duration-300"><div className="w-1.5 h-1.5 rounded-full bg-emerald-600 dark:bg-green-400 shrink-0 transition-colors duration-300" /> Currency appreciation benefits</li>
             </ul>
           </div>
         </div>
@@ -944,8 +1224,8 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
               a: "It is a good practice to review your FIRE progress annually. You should also revisit your plan whenever there are major life changes (like marriage, having kids, or a career shift) or significant economic shifts to ensure you are still on track and adjust your asset allocation if necessary."
             }
           ].map((faq, i) => (
-            <div 
-              key={i} 
+            <div
+              key={i}
               className="bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 rounded-2xl overflow-hidden shadow-sm dark:shadow-none transition-colors duration-300"
             >
               <button
@@ -981,11 +1261,11 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
             <div className="col-span-1 md:col-span-2">
               <div className="flex items-center gap-2 mb-4">
                 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M2 22L12 2L22 22H16L12 12L8 22H2Z" fill="url(#paint1_linear)"/>
+                  <path d="M2 22L12 2L22 22H16L12 12L8 22H2Z" fill="url(#paint1_linear)" />
                   <defs>
                     <linearGradient id="paint1_linear" x1="2" y1="2" x2="22" y2="22" gradientUnits="userSpaceOnUse">
-                      <stop stopColor="#60a5fa"/>
-                      <stop offset="1" stopColor="#3b82f6"/>
+                      <stop stopColor="#60a5fa" />
+                      <stop offset="1" stopColor="#3b82f6" />
                     </linearGradient>
                   </defs>
                 </svg>
@@ -995,7 +1275,7 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
                 Empowering Indians to achieve Financial Independence and Retire Early through smart, global investing strategies.
               </p>
             </div>
-            
+
             <div>
               <h4 className="text-slate-900 dark:text-white font-semibold mb-4 transition-colors duration-300">Resources</h4>
               <ul className="space-y-3 text-sm text-slate-600 dark:text-white/60">
@@ -1016,7 +1296,7 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
               </ul>
             </div>
           </div>
-          
+
           <div className="mt-12 pt-8 border-t border-slate-200 dark:border-white/10 flex flex-col md:flex-row justify-between items-center gap-4 transition-colors duration-300">
             <p className="text-slate-500 dark:text-white/40 text-sm transition-colors duration-300">
               © {new Date().getFullYear()} Mavericks. All rights reserved.
@@ -1032,7 +1312,7 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
 
       {/* Chat Widget */}
       <div className="fixed bottom-6 right-6 z-50 flex flex-col items-end gap-3">
-        
+
         {/* Welcome bubble */}
         <AnimatePresence>
           {showChatBubble && !isChatOpen && (
@@ -1087,11 +1367,10 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
               <div className="flex-1 overflow-y-auto p-4 space-y-3 min-h-0">
                 {chatMessages.map((msg, i) => (
                   <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                    <div className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${
-                      msg.role === 'user'
+                    <div className={`max-w-[80%] rounded-2xl px-4 py-2.5 text-sm leading-relaxed ${msg.role === 'user'
                         ? 'bg-blue-600 text-white rounded-br-sm'
                         : 'bg-slate-100 dark:bg-white/10 text-slate-800 dark:text-white/90 rounded-bl-sm'
-                    }`}>
+                      }`}>
                       {msg.text}
                     </div>
                   </div>
@@ -1160,4 +1439,3 @@ Keep responses concise, friendly, and India-specific. Use ₹ for currency. Answ
     </div>
   );
 }
-
